@@ -10,6 +10,13 @@ if (!CITY || !STREET || !HOUSE) {
   process.exit(1);
 }
 
+function escHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 async function notifySvitlobot(state) {
   const token = process.env.TG_BOT_TOKEN || '';
   const chatId = process.env.SVITLOBOT_CHAT_ID || '';
@@ -19,14 +26,14 @@ async function notifySvitlobot(state) {
   // (без общих экстренных отключений), раскомментируйте строку ниже:
   // if (!state.reason.toLowerCase().includes('ремонт')) return;
 
-  const title = state.reason || 'Аварійні ремонтні роботи';
+  const title = escHtml(state.reason || 'Аварійні ремонтні роботи');
   const lines = [`⚠️${title}`];
   if (state.start) {
-    lines.push(`Час початку – ${state.start}`);
+    lines.push(`Час початку – <b>${escHtml(state.start)}</b>`);
   }
   if (state.end) {
     const endClean = state.end.replace(/^до\s+/i, '');
-    lines.push(`Орієнтовний час відновлення електроенергії – до ${endClean}`);
+    lines.push(`Орієнтовний час відновлення електроенергії – <b>до ${escHtml(endClean)}</b>`);
   }
 
   try {
@@ -35,7 +42,8 @@ async function notifySvitlobot(state) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
-        text: lines.join('\n')
+        text: lines.join('\n'),
+        parse_mode: 'HTML'
       })
     });
     if (!res.ok) {
@@ -64,6 +72,7 @@ await page.addInitScript(() => {
   Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 });
 
+// Не тратим время на картинки, стили и шрифты при перегрузке сайта
 await page.route('**/*', (route) => {
   const type = route.request().resourceType();
   if (type === 'image' || type === 'media' || type === 'font' || type === 'stylesheet') {
