@@ -10,6 +10,44 @@ if (!CITY || !STREET || !HOUSE) {
   process.exit(1);
 }
 
+async function notifySvitlobot(state) {
+  const token = process.env.TG_BOT_TOKEN || '';
+  const chatId = process.env.SVITLOBOT_CHAT_ID || '';
+  if (!token || !chatId) return;
+
+  // Если в "Світлобот" нужны СТРОГО аварийные ремонтные работы
+  // (без общих экстренных отключений), раскомментируйте строку ниже:
+  // if (!state.reason.toLowerCase().includes('ремонт')) return;
+
+  const title = state.reason || 'Аварійні ремонтні роботи';
+  const lines = [`⚠️${title}`];
+  if (state.start) {
+    lines.push(`Час початку – ${state.start}`);
+  }
+  if (state.end) {
+    const endClean = state.end.replace(/^до\s+/i, '');
+    lines.push(`Орієнтовний час відновлення електроенергії – до ${endClean}`);
+  }
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: lines.join('\n')
+      })
+    });
+    if (!res.ok) {
+      console.warn('Svitlobot notify failed:', res.status, await res.text());
+    } else {
+      console.log('Svitlobot notification sent.');
+    }
+  } catch (err) {
+    console.warn('Svitlobot notify error:', err?.message || String(err));
+  }
+}
+
 const browser = await chromium.launch({
   headless: true,
   args: ['--disable-blink-features=AutomationControlled', '--no-sandbox']
@@ -26,7 +64,6 @@ await page.addInitScript(() => {
   Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 });
 
-// Не тратим время на картинки, стили и шрифты при перегрузке сайта
 await page.route('**/*', (route) => {
   const type = route.request().resourceType();
   if (type === 'image' || type === 'media' || type === 'font' || type === 'stylesheet') {
@@ -163,6 +200,10 @@ const changed =
 if (changed) {
   fs.writeFileSync('status.json', JSON.stringify(nextState, null, 2) + '\n', 'utf8');
   console.log('Status changed and saved:', JSON.stringify(nextState));
+
+  if (nextState.emerg === 1) {
+    await notifySvitlobot(nextState);
+  }
 } else {
   console.log('No status change. Current:', JSON.stringify({ emerg: nextState.emerg, start: nextState.start, end: nextState.end }));
 }
