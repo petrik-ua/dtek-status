@@ -27,7 +27,7 @@ async function notifySvitlobot(state) {
   // if (!state.reason.toLowerCase().includes('ремонт')) return;
 
   const title = escHtml(state.reason || 'Аварійні ремонтні роботи');
-  const lines = [`⚠️${title}`];
+  cconst lines = [`⚠️<b>${title}</b>`];
   if (state.start) {
     lines.push(`Час початку – <b>${escHtml(state.start)}</b>`);
   }
