@@ -17,6 +17,40 @@ function escHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
+function parseKyivDateTimeMs(str) {
+  const m = String(str || '').match(/(\d{1,2}):(\d{2})\s+(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  const dd = Number(m[3]);
+  const mo = Number(m[4]);
+  const yyyy = Number(m[5]);
+
+  const guessUtc = Date.UTC(yyyy, mo - 1, dd, hh, mm, 0);
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Kyiv',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(new Date(guessUtc));
+
+  const p = {};
+  for (const x of parts) p[x.type] = Number(x.value);
+  const kyivAsUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  const offsetMs = kyivAsUtc - guessUtc;
+  return guessUtc - offsetMs;
+}
+
+function isEndExpired(endStr) {
+  const endMs = parseKyivDateTimeMs(endStr);
+  if (endMs === null) return false;
+  return Date.now() >= endMs;
+}
+
 async function notifySvitlobot(state) {
   const token = process.env.TG_BOT_TOKEN || '';
   const chatId = process.env.SVITLOBOT_CHAT_ID || '';
@@ -27,7 +61,7 @@ async function notifySvitlobot(state) {
   // if (!state.reason.toLowerCase().includes('ремонт')) return;
 
   const title = escHtml(state.reason || 'Аварійні ремонтні роботи');
-  cconst lines = [`⚠️<b>${title}</b>`];
+  const lines = [`⚠️<b>${title}</b>`];
   if (state.start) {
     lines.push(`Час початку – <b>${escHtml(state.start)}</b>`);
   }
@@ -72,7 +106,6 @@ await page.addInitScript(() => {
   Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 });
 
-// Не тратим время на картинки, стили и шрифты при перегрузке сайта
 await page.route('**/*', (route) => {
   const type = route.request().resourceType();
   if (type === 'image' || type === 'media' || type === 'font' || type === 'stylesheet') {
@@ -154,11 +187,29 @@ try {
   await browser.close();
 }
 
+let prevState = null;
+if (fs.existsSync('status.json')) {
+  try { prevState = JSON.parse(fs.readFileSync('status.json', 'utf8')); } catch {}
+}
+
 if (!json) {
-  const hasPrev = fs.existsSync('status.json');
   const isCron = process.env.GITHUB_EVENT_NAME === 'schedule';
-  if (hasPrev && isCron) {
-    console.warn(`DTEK unavailable (${lastError}). Keeping previous status.json.`);
+  if (prevState && isCron) {
+    if (prevState.emerg === 1 && isEndExpired(prevState.end)) {
+      const cleared = {
+        ok: 1,
+        emerg: 0,
+        type: '',
+        reason: '',
+        start: '',
+        end: '',
+        updated: prevState.updated || ''
+      };
+      fs.writeFileSync('status.json', JSON.stringify(cleared, null, 2) + '\n', 'utf8');
+      console.log('DTEK unavailable, but previous emergency end time passed. Cleared status.json.');
+    } else {
+      console.warn(`DTEK unavailable (${lastError}). Keeping previous status.json.`);
+    }
     process.exit(0);
   }
   console.error(`All attempts failed: ${lastError}`);
@@ -171,18 +222,28 @@ if (!houseData) {
   process.exit(1);
 }
 
-const subType = String(houseData.sub_type || '').trim();
-const startDate = String(houseData.start_date || '').trim();
-const endDate = String(houseData.end_date || '').trim();
-const typeCode = String(houseData.type || '').trim();
+let subType = String(houseData.sub_type || '').trim();
+let startDate = String(houseData.start_date || '').trim();
+let endDate = String(houseData.end_date || '').trim();
+let typeCode = String(houseData.type || '').trim();
 const updated = String(json.updateTimestamp || '').trim();
 
 const low = subType.toLowerCase();
-const isEmerg =
+let isEmerg =
   typeCode === '2' ||
   low.includes('екстре') ||
   low.includes('аварій') ||
   low.includes('без застосування графіку');
+
+// Если указанное время восстановления уже прошло и не продлено — считаем работы завершёнными
+if (isEmerg && isEndExpired(endDate)) {
+  console.log(`Emergency end time (${endDate}) has passed. Treating as inactive.`);
+  isEmerg = false;
+  typeCode = '';
+  subType = '';
+  startDate = '';
+  endDate = '';
+}
 
 const nextState = {
   ok: 1,
@@ -193,11 +254,6 @@ const nextState = {
   end: endDate,
   updated
 };
-
-let prevState = null;
-if (fs.existsSync('status.json')) {
-  try { prevState = JSON.parse(fs.readFileSync('status.json', 'utf8')); } catch {}
-}
 
 const changed =
   !prevState ||
