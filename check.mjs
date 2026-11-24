@@ -26,61 +26,100 @@ await page.addInitScript(() => {
   Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 });
 
-let ajaxRes = null;
+// Не тратим время на картинки, стили и шрифты при перегрузке сайта
+await page.route('**/*', (route) => {
+  const type = route.request().resourceType();
+  if (type === 'image' || type === 'media' || type === 'font' || type === 'stylesheet') {
+    return route.abort();
+  }
+  return route.continue();
+});
+
+let json = null;
+let lastError = '';
 
 try {
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    await page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', {
-      waitUntil: 'domcontentloaded',
-      timeout: 45000
-    });
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      await page.waitForSelector('meta[name="csrf-token"]', { state: 'attached', timeout: 25000 });
+      console.log(`Attempt ${attempt}/3: opening DTEK page...`);
+      const resp = await page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+      const httpStatus = resp ? resp.status() : 0;
+      console.log(`Page HTTP status: ${httpStatus}`);
+
+      if (httpStatus >= 500 || httpStatus === 429) {
+        throw new Error(`Site overloaded (HTTP ${httpStatus})`);
+      }
+
+      await page.waitForSelector('meta[name="csrf-token"]', {
+        state: 'attached',
+        timeout: 30000
+      });
+
+      const ajaxRes = await page.evaluate(async ({ city, street }) => {
+        const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+        const updateFact = window.DisconSchedule?.fact?.update || '';
+        const params = new URLSearchParams();
+        params.append('method', 'getHomeNum');
+        params.append('data[0][name]', 'city');
+        params.append('data[0][value]', city);
+        params.append('data[1][name]', 'street');
+        params.append('data[1][value]', street);
+        if (updateFact) {
+          params.append('data[2][name]', 'updateFact');
+          params.append('data[2][value]', updateFact);
+        }
+
+        const res = await fetch('/ua/ajax', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRF-Token': csrf
+          },
+          body: params.toString()
+        });
+        const text = await res.text();
+        return { status: res.status, text };
+      }, { city: CITY, street: STREET });
+
+      if (ajaxRes.status !== 200) {
+        throw new Error(`AJAX failed with HTTP ${ajaxRes.status}`);
+      }
+
+      const parsed = JSON.parse(ajaxRes.text);
+      if (!parsed?.data) {
+        throw new Error('AJAX response has no data field');
+      }
+
+      json = parsed;
       break;
-    } catch {
-      if (attempt === 2) throw new Error('WAF challenge did not resolve (no csrf-token)');
-      await page.waitForTimeout(3000);
+    } catch (err) {
+      lastError = err?.message || String(err);
+      console.warn(`Attempt ${attempt} failed: ${lastError}`);
+      if (attempt < 3) {
+        await page.waitForTimeout(5000);
+      }
     }
   }
-
-  ajaxRes = await page.evaluate(async ({ city, street }) => {
-    const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-    const updateFact = window.DisconSchedule?.fact?.update || '';
-    const params = new URLSearchParams();
-    params.append('method', 'getHomeNum');
-    params.append('data[0][name]', 'city');
-    params.append('data[0][value]', city);
-    params.append('data[1][name]', 'street');
-    params.append('data[1][value]', street);
-    if (updateFact) {
-      params.append('data[2][name]', 'updateFact');
-      params.append('data[2][value]', updateFact);
-    }
-
-    const res = await fetch('/ua/ajax', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-CSRF-Token': csrf
-      },
-      body: params.toString()
-    });
-    const text = await res.text();
-    return { status: res.status, text };
-  }, { city: CITY, street: STREET });
 } finally {
   await browser.close();
 }
 
-if (!ajaxRes || ajaxRes.status !== 200) {
-  console.error('AJAX failed, HTTP:', ajaxRes?.status);
+if (!json) {
+  const hasPrev = fs.existsSync('status.json');
+  const isCron = process.env.GITHUB_EVENT_NAME === 'schedule';
+  if (hasPrev && isCron) {
+    console.warn(`DTEK unavailable (${lastError}). Keeping previous status.json.`);
+    process.exit(0);
+  }
+  console.error(`All attempts failed: ${lastError}`);
   process.exit(1);
 }
 
-const json = JSON.parse(ajaxRes.text);
 const houseData = json?.data?.[HOUSE];
-
 if (!houseData) {
   console.error('House key not found in response. Available keys count:', Object.keys(json?.data || {}).length);
   process.exit(1);
