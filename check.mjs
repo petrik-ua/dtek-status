@@ -229,16 +229,29 @@ let typeCode = String(houseData.type || '').trim();
 const updated = String(json.updateTimestamp || '').trim();
 
 const low = subType.toLowerCase();
-let isEmerg =
-  typeCode === '2' ||
-  low.includes('екстре') ||
-  low.includes('аварій') ||
-  low.includes('без застосування графіку');
+const isStabilization =
+  low.includes('стабілізац') ||
+  low.includes('згідно графіку') ||
+  low.includes('по графіку');
 
-// Если указанное время восстановления уже прошло и не продлено — считаем работы завершёнными
+let isEmerg =
+  !isStabilization &&
+  (
+    low.includes('екстре') ||
+    low.includes('аварій') ||
+    low.includes('без застосування графіку') ||
+    low.includes('гав')
+  );
+
 if (isEmerg && isEndExpired(endDate)) {
   console.log(`Emergency end time (${endDate}) has passed. Treating as inactive.`);
   isEmerg = false;
+}
+
+if (!isEmerg) {
+  if (subType) {
+    console.log(`Ignoring non-emergency outage status: "${subType}"`);
+  }
   typeCode = '';
   subType = '';
   startDate = '';
